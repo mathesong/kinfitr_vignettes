@@ -1,0 +1,120 @@
+---
+title: 'kinfitr Part 2: Basic Use and Iteration'
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+---
+
+# Introduction
+
+When making use of linearised models, most of them have a t\* parameter either as an option or a requirement. These models rely on asymptotic properties of the data, and these properties only apply after a certain point: i.e. when the modified function becomes sufficiently linear. The way I've made these work in *kinfitr* is quite specific, and I think optimal.
+
+I've compiled the results of the vignettes on my website, as well as written up a primer on PET modelling theory for anyone who's interested.  Check it out [here](https://www.granvillematheson.com/post/2020-02-21-pharmacokinetic-modelling-of-pet-data-in-r-using-kinfitr-part-1-theory)
+
+# Packages
+
+First, let's load up our packages
+
+```{r}
+#remotes::install_github("mathesong(kinfitr")
+
+library(kinfitr)
+library(ggplot2)
+
+theme_set(theme_light())
+```
+
+
+
+# t star
+
+As described the t\* is the point at which the linear function becomes linear. What we essentially want to do here is to use as many values as possible to draw our line as well as possible, but we also know that too many values start to cause bias in our line. So we make a tradeoff between fitting our line well, and avoiding the point at which the values no longer fall along that line.
+
+The t\* value can be expressed as a number of minutes, or as a count of the number of frames from the end of the end of the PET measurement. In *kinfitr*, I've just used the latter, but when PET measurements are of different lengths, this gets a little annoying, so I'm considering adding functionality for adding a time point instead in future. But, for now, if your PET measurements have different numbers of frames, it's on you to choose the number of frames that correspond to the time point you want.
+
+It's also worth mentioning that the t\* is has slightly different reasons for assignment in different models. Considering reference tissue models, in MRTM1 and MRTM2, the t* value is necessary only if the tissue dynamics do not correspond to one-tissue compartment dynamics, which the simulated values in *simref* specifically do.  However, we do need to identify a t\* value for the non-invasive Logan plot and the multilinear non-ínvasive Logan plot. We would be able to see this from the plots, but it's worth knowing that sometimes this requirement is different. For all models with a t\* value, however, I have included a t\* finder in *kinfitr*, and the interpretation of these plots is always the same.
+
+## t\* finder plots 
+
+For the assessment of t* in *kinfitr*, I specifically opted to give the user a big busy output, so that they can make a maximally informed decision. There is another piece of software which simply uses a single criterion, and selects an appropriate t\* value using this criterion for the user.  But this makes it really easy to overfit some individuals if there was a little bit of noise here or there. Furthermore, the outcome values are not usually stable across different values of the t*, so this could cause another source of bias if it differs between individuals.
+
+Let's take a look at one of these for the non-invasive Logan plot and I'll explain my logic of how to interpret it below.  The user is asked to provide 3 time activity curves from each individual here. Ideally, this should be from a high-binding, a medium-binding and a low-binding region. The reason is that sometimes high-binding regions have a later t\* value for example. But if you only have 1 TAC, just specify the same in all three: it doesn't really matter. Ideally, please use large regions, because small ones can be a bit noisy.
+
+We need to specify a k2prime value for this model. I'll just use 0.1 as it's close enough for now. This was covered in Part 2.
+
+```{r, fig.height=12, fig.width=15}
+set.seed(12345)
+
+subs <- sample(1:nrow(simref), size = 3, replace = F)
+
+s = subs[1]
+
+td <- simref$tacs[[s]]
+refLogan_tstar(t_tac = td$Times, reftac = td$Reference, lowroi = td$ROI3,
+               medroi = td$ROI2, highroi = td$ROI1,
+               k2prime = 0.1)
+```
+
+So, let's go through what we see here.
+
+### First Row
+
+In the first row, we see the modified function values which we are fitting with a linear regression. They are quite straight on the right hand side, but not on the left. This is at the heart of the issue, and is why we need a t\* value.
+
+### Second Row
+
+In the second row, we see the R^2^ values for each value of t\*. This gives us some kind of index of how straight the line is.
+
+### Third Row
+
+In the third row is our most useful information. Here, we see the number of frames plotted against the maximum percentage residual size.  In other words, we take all residuals, calculate them as a percentage of their corresponding measured values, and take the maximum. This is the criterion which the other software package uses, and the user specifies either 5% or 10%, and it chooses the maximum number of frames below that value. The issue is that our residuals are pretty small, and small deviations can cause this value to be chosen quite differently. 
+
+In my opinion, a better approach is to look at several individuals, and several ROIs, and choose a number of frames which is generally applicable, and which keeps a fairly low degree of error. I don't like the idea of having a strict binary criterion, and I don't like assessing it on an individual basis. It is worth considering, though, that if you are only interested in only specific regions with high or low binding, then it might be worthwhile selecting a t\* value that works for those regions specifically, and not examining the rest. This can cause you to estimate the other regions poorly, but estimate for the region you're specifically interested in better.
+
+### Bottom Row
+
+On the left, we can see the TACs.  This is helpful for seeing what any source of weirdness in our t\* plots could be caused by.
+
+On the right, we can see the outcome values which we obtain for each value.  This data is artificially good, and it looks really stable.  This is rarely the case. I usually try to choose a value which dones't lie right on a steep part of this curve, otherwise we're likely to see bias between individuals based on slight differences of where the t\* value lies on this curve (as it could be at the top or bottom of a steep part depending on true underlying binding - so we could be emphasising or hiding individual differences as a result of our model).
+
+## Choosing a t\* value
+
+Now, let's look at a few of these curves, and come to a reasoned decision.
+
+```{r, fig.height=12, fig.width=15}
+set.seed(42)
+
+subs <- sample(1:nrow(simref), size = 3, replace = F)
+
+s = subs[1]
+
+td <- simref$tacs[[s]]
+refLogan_tstar(t_tac = td$Times, reftac = td$Reference, lowroi = td$ROI3,
+               medroi = td$ROI2, highroi = td$ROI1,
+               k2prime = 0.1)
+
+s = subs[2]
+
+td <- simref$tacs[[s]]
+refLogan_tstar(t_tac = td$Times, reftac = td$Reference, lowroi = td$ROI3,
+               medroi = td$ROI2, highroi = td$ROI1,
+               k2prime = 0.1)
+
+s = subs[3]
+
+td <- simref$tacs[[s]]
+refLogan_tstar(t_tac = td$Times, reftac = td$Reference, lowroi = td$ROI3,
+               medroi = td$ROI2, highroi = td$ROI1,
+               k2prime = 0.1)
+```
+
+
+We can see the following in general:
+
+* The R^2^ values are pretty high after around 10 frames
+* The maximum percentage variance tends to increase quickly after around 12-15 frames, though it is earlier and later for different individuals and different regions.  But 12 seems to still be low for most of them.
+* Also, after about 10 frames, the BP~ND~ values are quite stable (bottom right)
+
+So, here, I reckon 12 frames is a pretty good number for the t\*.

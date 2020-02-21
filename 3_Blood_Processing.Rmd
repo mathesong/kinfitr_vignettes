@@ -1,0 +1,384 @@
+---
+title: 'kinfitr Part 2: Basic Use and Iteration'
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+---
+
+# Introduction
+
+When making use of reference tissue modelling in PET, all the data comes from the PET image, and everything is comparatively straightforward. When using an arterial input function, we have parallel series of measurements. While the PET is running, we are collecting blood in parallel, and often using both continuous and manual sampling. With that blood, we are measuring blood radioactivity, and plasma radioactivity, and the parent (unmetabolised) fraction, and the blood-to-plasma ratio. And we use *all* of these, together, to derive the arterial input function (AIF).
+
+At my previous institution, we have something of a tradition of using data in as raw a format as possible, and we would simply interpolate our curves. However, this depends greatly on the number of samples we record as well as the quality of those samples.  Here I'll go through the process of working with this data, and modelling it as we see fit.
+
+I've compiled the results of the three vignettes on my website, as well as written up a primer on PET modelling theory for anyone who's interested.  Check it out [here](https://www.granvillematheson.com/post/2020-02-21-pharmacokinetic-modelling-of-pet-data-in-r-using-kinfitr-part-1-theory)
+
+# Packages
+
+First, let's load up our packages
+
+```{r}
+#remotes::install_github("mathesong(kinfitr")
+
+library(kinfitr)
+library(tidyverse)
+library(knitr)
+library(cowplot)
+library(mgcv)
+library(ggforce)
+
+theme_set(theme_light())
+```
+
+
+# Blood Processing
+
+When making use of reference tissue modelling in PET, all the data comes from the PET image, and everything is comparatively straightforward. When using an arterial input function, we have parallel series of measurements. While the PET is running, we are collecting blood in parallel, and often using both continuous and manual sampling. With that blood, we are measuring blood radioactivity, and plasma radioactivity, and the parent (unmetabolised) fraction, and the blood-to-plasma ratio. And we use *all* of these, together, to derive the arterial input function (AIF).
+
+At my previous institution, we have something of a tradition of using data in as raw a format as possible, and we would simply interpolate our curves. However, this depends greatly on the number of samples we record as well as the quality of those samples.  Here I'll go through the process of working with this data, and modelling it as we see fit.
+
+The first, and quite serious issue, is that of storage.  Data is often stored in different ways between, or even within research groups, and this does not bode well for data sharing and the development of broadly-applicable tools.  This issue is, however, essentially resolved by the introduction of PET BIDS, which provides a JSON file (called a JSON sidecar) along with every image file, and the sidecar contains all the information which is required in addition to the image file, stored in a highly structured manner.  *kinfitr* can automatically read these sidecar files and pull in all the knowledge it needs.  However, there is also a function for pulling in all the data as numeric vectors as numbers from all their different sources.
+
+From here, it creates a *blooddata* object with them: this is a structure for storing the raw data, as well as how this data should be modelled, and how the final resulting interpolating curves should be created.  Within the *pbr28* data within *kinfitr* I have put together the information which would be available within the PET BIDS JSON sidecar file for each measurement in a column called *jsondata*, which can be loaded directly as if it were a JSON file.  Here, I will create blooddata objects out of them all.
+
+I'll also cut down the size of the data to make it a little bit quicker to process.
+
+```{r}
+data(pbr28) 
+
+pbr28 <- pbr28[1:4,]
+
+pbr28 <- pbr28 %>% 
+  select(-procblood, -input, -Genotype, -injRad)
+
+head(pbr28)
+```
+
+Now we can create a *blooddata* object from each.
+
+```{r}
+pbr28 <- pbr28 %>% 
+  mutate(blooddata = map(jsondata, create_blooddata_bids))
+```
+
+If we did not have JSON sidecars, the function to use is ´kinfitr::create_blooddata_components()´, which has a devastating number of input arguments. In short, just go and save your blood measurements in BIDS format if you have any say at all, and even if you don't, it's worth setting up systems to convert it. This will save you lots of time and energy (especially when files disappear, or no one's around to explain what actually happened in old processes, as I've encountered before).
+
+### Dispersion Correction
+
+The first step is dispersion correction of blood samples collected through the automatic blood sampling system: as blood travels through the plastic tubing, it sticks to the sides, and there is some dispersion of our measured signal.  This is corrected for using the dispersion constant (included in the BIDS sidecar). This is a value representing the degree to which our measurements are dispersed over time, based on experiments performed when calibrating the automatic blood sampling system. All functions which can be used on the *blooddata* objects are prefixed with *bd_*, in this case *bd_blood_dispcor*.
+
+```{r}
+pbr28 <- pbr28 %>% 
+  mutate(blooddata = map(blooddata, 
+                         ~bd_blood_dispcor(.x, smooth_iterations = 0)))
+```
+
+In this case, we first perform dispersion correction. This makes the data slightly noisier, so we can also smooth the data slightly. The latter step is not necessary though, and I don't do it here, so I've set the number of smoothing iterations to 0.
+
+### The `blooddata` object
+
+Inside the ´blooddata´ object is a complex list.
+
+```{r}
+blooddata <- pbr28$blooddata[[1]]
+
+str(blooddata)
+```
+
+Essentially, it can be divided into a few parts.
+
+```{r}
+names(blooddata)
+```
+
+At the first level of the hierarchy, we have timeshift numeric value, which is there in case we know that our time values have been shifted by some amount. Within Data, we have most of the PET BIDS blood fields from the JSON sidecar. And within Models, we have the methods by which the blood data should be interpolated to created the final interpolated curves for modelling.  In this case, because we have not yet done anything, everything is simply linearly interpolated.
+
+```{r}
+blooddata$Models
+```
+
+Within these, the Method field describes what should be done, and the Data fields describes what should be used for doing that. Because of the fact that there are loads of different ways to model blood data, and because many of these ways are defined in an *ad hoc* manner, I've designed thus system to be as flexible as possible.  We can add:
+
+* Model parameters for models which are defined within *kinfitr*
+* Fit objects for models we can define using R, but which aren't necessarily in *kinfitr*
+* Fitted values for methods which exist outside of R, or do not function at an individual level.
+
+Once we've done all the modelling of the blood with the *blooddata* object, we can interpolate it into an *input* object that we used in Part 2 of the tutorial.
+
+### Modelling the Blood
+
+Let's have a look at a few blood curves
+
+```{r}
+plot(pbr28$blooddata[[1]])
+
+plot(pbr28$blooddata[[2]])
+
+plot(pbr28$blooddata[[3]])
+```
+
+For these images, I opted to re-scale them so that we can see all the curves together. This is because the final AIF is based on all of the other curves, and if something is wrong, it's helpful to see how it's affecting the rest.
+
+Let's model some of these curves to make them a bit smoother.
+
+#### Modelling the Parent Fraction
+
+Within *kinfitr*, there are a few different models for the parent fraction, which can be used at will, and compared easily using various model comparison metrics. 
+
+Here I'll try out a few, and we can see how they do. The Guo modification of the Hill function was specifically designed for tracers within the same family as PBR28, so we expect it to perform especially well.
+
+To get data out of the `bloddata` object, we use the `bd_getdata` function, and then we specify what we want.
+
+
+Note that all models for the parent fraction, start with `metab_` so that they can easily be shuffled through.
+
+```{r}
+pfdat <- bd_getdata(blooddata, output = "parentFraction")
+
+powermodel    <- metab_power(pfdat$time, pfdat$parentFraction)
+expmodel      <- metab_exponential(pfdat$time, pfdat$parentFraction)
+invgammamodel <- metab_invgamma(pfdat$time, pfdat$parentFraction)
+hillmodel     <- metab_hill(pfdat$time, pfdat$parentFraction)
+hillguomodel  <- metab_hillguo(pfdat$time, pfdat$parentFraction)
+
+BIC( powermodel, expmodel, invgammamodel, hillmodel, hillguomodel )
+
+```
+
+According to the BICs, our power model appears to be performing best.
+
+Let's look at some plots. We'll add the fits to the blooddata object, and plot them there. We'll be looking at the purple line.
+
+```{r}
+bd_addfit(blooddata, powermodel, modeltype = "parentFraction") %>% 
+  plot() + labs(title="Power Model")
+
+bd_addfit(blooddata, expmodel, modeltype = "parentFraction") %>% 
+  plot() + labs(title="Exponential Model")
+
+bd_addfit(blooddata, invgammamodel, modeltype = "parentFraction") %>% 
+  plot() + labs(title="Inverse Gamma Model")
+
+bd_addfit(blooddata, hillmodel, modeltype = "parentFraction") %>% 
+  plot() + labs(title="Hill Model")
+
+bd_addfit(blooddata, hillguomodel, modeltype = "parentFraction") %>% 
+  plot() + labs(title="Guo Modification of Hill Model")
+```
+
+
+Each of these models have their own specific shapes, which we must select between to model the shape of the metabolism curve for each tracer. And then there are heaps of modification of all the different models which are created to adapt to curves which slightly differ from the primary models. In this case, we can see that the power and inverse gamma models are not able to level out towards the end sufficiently. The exponential model can't handle the slow start, but does level out. The Hill model handles the end nicely, but can't quite hit the values in the middle. The Guo modification does a pretty good job of representing the curve though.
+
+Obviously, we can't make these generalisations from just one curve, but if you would look at the rest, you would see that these biases at various parts of the curve are quite consistent between the different curves. I usually encourage performing model comparison with BIC and AIC and seeing which models are winning most of the time, and then looking at a few plots to get a feeling for why they're winning out.
+
+So, from here, let's proceed with the *hillguo* model, and add it to all our blooddata objects.
+
+
+```{r}
+set.seed(123)
+
+pbr28 <- pbr28 %>% 
+  group_by(PET) %>% 
+  mutate(pfdat = map(blooddata, 
+                ~bd_getdata(.x, output = "parentFraction")),
+         hillguomodel = map(pfdat,
+                ~metab_hillguo(.x$time, .x$parentFraction, multstart_iter = 100)),
+         blooddata = map2(blooddata, hillguomodel,
+                ~bd_addfit(.x, .y, modeltype = "parentFraction"))) %>%
+  select(-pfdat, -hillguomodel)
+```
+
+Let's check out how it went for a few. In proper analyses, I would advise looking at *all* fits, because these can go wrong. And if they do go wrong, they can often be fixed by trying to fit them again: these functions use a *multstart* approach, because the starting parameters can differ so greatly from tracer to tracer that they're a pain to define. You can use more iterations, or a new seed. (PS: I also recommend always setting the seed first).
+
+```{r}
+plot(pbr28$blooddata[[1]])
+
+plot(pbr28$blooddata[[2]])
+
+plot(pbr28$blooddata[[3]])
+```
+
+Now we see a much smoother fit to the parent fraction. This will surely do a better job of representing this curve than a simple interpolation. However, we do also see that we consistently underestimate around 20 minutes. We'll just have to live with this...
+
+#### Modelling the blood-plasma ratio
+
+The blood-plasma ratio doesn't seem to follow any particular function here, and there are no in-built methods for modelling this in *kinfitr*. Sometimes, it is constant. Sometimes it can be modelled with a straight line. Sometimes with a particular function. In this case, we see that it just appears really wonky. This could either be because it shows oddd kinetics, or because it's hard to measure. This will probably benefit from a smooth line fit through it. In R, we can do this using a Generalised Additive Model.  That's not built into *kinfitr*, but let's try it in R, and just throw that into the `blooddata` object. We'll do it for everyone at once.
+
+
+```{r}
+pbr28 <- pbr28 %>% 
+  group_by(PET) %>% 
+  mutate(bprdat = map(blooddata, 
+                ~bd_getdata(.x, output = "BPR")),
+         bprmodel = map(bprdat,
+                ~gam(bpr ~ s(time), data=.x)),
+         blooddata = map2(blooddata, bprmodel,
+                ~bd_addfit(.x, .y, modeltype = "BPR"))) %>%
+  select(-bprdat, -bprmodel)
+```
+
+And let's check how the plots look. Here we're looking at the blue curves at the top.
+
+```{r}
+plot(pbr28$blooddata[[1]])
+
+plot(pbr28$blooddata[[2]])
+
+plot(pbr28$blooddata[[3]])
+```
+
+Clearly the fits are not fantastic, but they are certainly better than nothing. An interpolation would be going all over the show here, so I think we'll settle for these.
+
+#### Modelling the blood and arterial input function
+
+Let's also go ahead and model the blood and AIF too while we're at this.  It's important to note that I do this last of all.  This is because the AIF 'data' that we have, is the result of the model fitting we've performed above.  And for the blood, we've modelled the BPR using the raw data.  We will use this curve then to apply to the blood curve that we have, which we would ideally like to smooth a little bit.
+
+##### Blood
+
+Modelling the blood specifically is not so common: it can be tricky. But it is helpful for us to know how much of the radioactivity in the brain is attributable to the radioactivity which is just in the blood which is passing through (and makes up about 5% of the tissue). It is especially tricky though, because this curve can go up towards the end sometimes, so many functions can't adequately fit it. Furthermore, when we have both continuous and manual samples, we have an extremely high density of samples at the start and much fewer towards the end. 
+
+For modelling of blood or AIF data, there is a spline function in *kinfitr*, which fits three splines: one to the rise, one to the automatic fall, and one to the manual fall. And then we gradually hand off the automatic to the manual fall. This tends to work quite well.  In this particular study, there were some issues with the blood data collection, and it is believed that the automatic sampling system was placed slightly too near to the participants for some measurements, and so there is an offset between the manual and automatic samples, and the hand-off method handles this quite well.  Let's give it a shot.
+
+**Note:** if you are going to model your AIF, I would advise either *not* modelling the blood, or else modelling it *after* the AIF. This will become clear later. I'm doing it here to make something else clearer later, for pedagogical reasons.
+
+```{r}
+pbr28 <- pbr28 %>% 
+  group_by(PET) %>% 
+  mutate(bddat = map(blooddata, 
+                ~bd_getdata(.x, output = "Blood")),
+         bdmodel = map(bddat,
+                ~blmod_splines(.x$time, .x$activity, Method = .x$Method)),
+         blooddata = map2(blooddata, bdmodel,
+                ~bd_addfit(.x, .y, modeltype = "Blood"))) %>%
+  select(-bddat, -bdmodel)
+```
+
+Let's see
+
+```{r}
+plot(pbr28$blooddata[[1]])
+
+plot(pbr28$blooddata[[2]])
+
+plot(pbr28$blooddata[[3]])
+```
+
+And let's look at the first 10 minutes to get a better idea of what's going on.
+
+```{r}
+plot(pbr28$blooddata[[1]]) + xlim(c(0,10))
+
+plot(pbr28$blooddata[[2]]) + xlim(c(0,10))
+
+plot(pbr28$blooddata[[3]]) + xlim(c(0,10))
+```
+
+##### AIF
+
+Now, when it comes to the AIF, it is again important to remember just what our "data" is.  We have blood data, which gets multiplied by the blood-to-plasma ratio to get the plasma data. Then we have to multiply this through the parent fraction to get the metabolite-corrected AIF So, modelling the previous curves has served as preprocessing for getting our AIF data to look as good as we can get it. And now we're going to model the *result* of those steps.
+
+Let's just take a look to see the effect of our processing.  We saved a single `blooddata` object earlier before we did any processing, and never added any fits besides to plot it.  So let's compare the same set before and after modelling.  Look especially at the AIF data, and we'll zoom in on the first 12 minutes to compare.
+
+```{r}
+plot(blooddata) + xlim(c(0,12)) + labs(title="Before Modelling")
+plot(pbr28$blooddata[[1]]) + xlim(c(0,12)) + labs(title="After Modelling")
+```
+
+**Note:** At this point, it's worth mentioning that I did the blood modelling above mostly to make this point more clear. If you are going to model your AIF, I would advise either *not* modelling the blood, or else modelling it *after* the AIF. Because, by doing it here, our AIF is extremely dependent on the blood model. And we would prefer to have modelled a slightly rawer version of that data to get a better fit.
+
+```{r, eval=FALSE}
+pbr28 <- pbr28 %>% 
+  group_by(PET) %>% 
+  mutate(aifdat = map(blooddata, 
+                ~bd_getdata(.x, output = "AIF")),
+         aifmodel = map(aifdat,
+                ~blmod_exp(.x$time, .x$aif, Method = .x$Method, )),
+         blooddata = map2(blooddata, aifmodel,
+                ~bd_addfit(.x, .y, modeltype = "AIF"))) %>%
+  select(-aifdat, -aifmodel)
+```
+
+I've not run this above, because when I do, we hit upon errors because the model fails to converge.  This is the result of having modelled the blood first: our model is not managing to fit to the data.  Let's set the blood to simply be interpolated for now, we'll model the AIF using the raw blood, and then we'll go back to the smoothed blood later.
+
+First, let's have a look at what the `blooddata` object looks like here.
+
+```{r}
+pbr28$blooddata[[1]]$Models$Blood$Method
+```
+
+Ok, so we're now using a "fit" instead of an "interp". Let's change this to an "interp" again and try to model the data again. It's worth noting here that each time we extract AIF data, it is regenerated with the current configurations.
+
+```{r}
+pbr28 <- pbr28 %>% 
+  group_by(PET) %>% 
+  mutate(blooddata=map(blooddata, ~modify_in(.x,
+                                             c("Models", "Blood", "Method"), 
+                                             ~ "interp"))) %>% 
+  mutate(aifdat = map(blooddata, 
+                ~bd_getdata(.x, output = "AIF")),
+         aifmodel = map(aifdat,
+                ~blmod_exp(.x$time, .x$aif, Method = .x$Method, )),
+         blooddata = map2(blooddata, aifmodel,
+                ~bd_addfit(.x, .y, modeltype = "AIF"))) %>%
+  select(-aifdat, -aifmodel)
+```
+
+And now it works!
+
+It's also worth noting here, that the bi- or tri-exponential model (you can do either with the `blmod_exp` function) for blood curves can be quite tricky to get right. This model is not identifiable, as it is a sum of two or three exponential decays, and one decay can be accommodated by another. So, inside the function, we have a function to select starting parameters, and the starting parameters really are at the core of getting this model to work (trust me! I've spent far too long with this model). If your fit does not work, I would advise messing around with the `expdecay_props` first.
+
+These values defines the fractions of the curve for which the starting parameters are estimated for. So, first, we estimate the third exponential by assuming it applies mostly to the end of the curve, and then we shave this exponential away to estimate the second exponential, and we assume that this exponential primarily applies to a different fraction of the curve. My assumption has been that there is an optimal set of these values for each tracer, but this might not be the case. In any case, if your model is not working, this is the first place to start experimenting. There are also a *lot* of different configurations of this model. Look into the documentation to understand them better if you are interested, but the default configuration is usually the one to go for in my opinion.
+
+And let's check how the plots look. Now we're looking at the red curves.
+
+```{r}
+plot(pbr28$blooddata[[1]])
+
+plot(pbr28$blooddata[[2]])
+
+plot(pbr28$blooddata[[3]])
+```
+
+We can't see that much here: let's take a look at the start to get a better idea.
+
+```{r}
+plot(pbr28$blooddata[[1]]) + xlim(c(0,5))
+
+plot(pbr28$blooddata[[2]]) + xlim(c(0,5))
+
+plot(pbr28$blooddata[[3]]) + xlim(c(0,5))
+```
+
+Lookin' good!  Let's re-smooth our blood curves and move on. Recall that we only changed the method, and didn't remove the model. So we'll just change it back to use a fit.
+
+```{r}
+pbr28 <- pbr28 %>% 
+  group_by(PET) %>% 
+  mutate(blooddata=map(blooddata, ~modify_in(.x,
+                                             c("Models", "Blood", "Method"), 
+                                             ~ "fit")))
+```
+
+And we can take one more peak.
+
+```{r}
+plot(pbr28$blooddata[[1]]) + xlim(c(0,12)) + labs(title="12 minutes")
+
+plot(pbr28$blooddata[[1]]) + xlim(c(0,5)) + labs(title="5 minutes")
+```
+
+
+### Interpolating the blood data for kinetic modelling
+
+Now, we want to extract the interpolated curves for the purpose of using this in the kinetic models.  This means, in *kinfitr*, extracting an `input` object from a `blooddata` object. 
+
+```{r}
+pbr28 <- pbr28 %>% 
+  group_by(PET) %>% 
+  mutate(input = map(blooddata, bd_getdata))
+```
+
+Done!  Now we can get to modelling.  See Part 1.
+

@@ -1,0 +1,621 @@
+---
+title: 'kinfitr Part 2: Basic Use and Iteration'
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float:
+      toc_collapsed: true
+  html_notebook: default
+  pdf_document: default
+---
+
+# Introduction
+
+Here I'll cover basic use of the *kinfitr* package, modelling single curves and iteration across multiple, and checking fits etc.  I cover both reference tissue modelling as well as models employing arterial input.
+
+I've compiled the results of the vignettes on my website, as well as written up a primer on PET modelling theory for anyone who's interested.  Check it out [here](https://www.granvillematheson.com/post/2020-02-21-pharmacokinetic-modelling-of-pet-data-in-r-using-kinfitr-part-1-theory)
+
+# Packages
+
+First, let's load up our packages
+
+```{r}
+#remotes::install_github("mathesong(kinfitr")
+
+library(kinfitr)
+library(tidyverse)
+library(knitr)
+library(cowplot)
+library(mgcv)
+library(ggforce)
+
+theme_set(theme_light())
+```
+
+
+# Reference Region Models
+
+I'll start off with a demonstration of how *kinfitr* can be used to fit reference region models, since they're a little bit more straightforward. I will use the dataset included in the package, called *simref*. This dataset is simulated to correspond to data which can be successfully modelled with reversible reference-region approaches, with one-tissue dynamics in all regions (this is one of the assumptions of several reference tissue models. It doesn't go against having specific binding in a particular region, but it should equilibrate with the non-displaceable compartment so quickly as to be possible to model it as the same compartment).
+
+
+```{r}
+data(simref)
+```
+
+Let's have a look at how the data is structures:
+
+```{r}
+head(simref)
+```
+
+... and within the nested data under tacs is the following:
+
+```{r}
+head(simref$tacs[[1]])
+```
+
+## Fitting the data
+
+### Fitting a single TAC
+
+First let's fit a single TAC to see how everything works. Here, I use the simplified reference tissue model. This model is quite flexible, though does have several assumptions (detailed really nicely [here](https://journals.sagepub.com/doi/pdf/10.1038/jcbfm.2014.202)).
+
+```{r}
+tacdata_1 <- simref$tacs[[1]]
+
+t_tac <- tacdata_1$Times
+reftac <- tacdata_1$Reference
+roitac <- tacdata_1$ROI1
+weights <- tacdata_1$Weights
+
+fit1 <- srtm(t_tac, reftac, roitac)
+```
+
+Now let's look at the fit
+
+```{r}
+plot(fit1)
+
+plot_residuals(fit1)
+```
+
+And what is in the fit object?
+
+```{r}
+str(fit1)
+```
+There's a lot.
+
+Of primary importance:
+
+* __par__ contains the fitted parameters. In this case, these parameters are R1 ($=\frac{K_1}{K_1'}$) and k2. This is what we'll use most of all.
+
+```{r}
+fit1$par
+```
+
+
+* __par.se__ contains the standard errors as a fraction of the values
+
+```{r}
+fit1$par.se
+```
+
+So here we can see that the parameters were estimated with a pretty high degree of certainty: 2% error on BP~ND~ is not bad at all!
+
+* __fit__ contains the actual model fit object, which we can do all sorts of great things with
+* __weights__, __tacs__, __model__ are pretty self-explanatory
+
+The fit object being there means we can do all of the things that R, being a language designed by statisticians, allows us to do easily
+
+```{r}
+g <- fit1$fit
+
+coef(g)
+resid(g)
+vcov(g)
+AIC(g)
+BIC(g)
+
+```
+
+## Iterating Across Individuals for One Region
+
+Now let's fit a model to more TACs, one from each individual.  I'll also use a different model for fun (and because it's faster): in this case MRTM1. MRTM1 is a linear model, which estimates both BP~ND~ and k2'.
+
+**Note:** Most linearised models have, as either a required or optional parameter, a t\* value. I'll cover this in the tstar vignette. But, for now, we don't need to worry about this as MRTM1 and MRTM2 require a t\* value only in the case of not following 1-tissue compartment dynamics, and this data was specifically simulated to follow this. But I'll use a value for some of the other models, but read the other vignette to understand this.
+
+
+```{r}
+simref <- simref %>% 
+  group_by(Subjname, PETNo) %>% 
+  mutate(MRTM1fit = map(tacs, ~mrtm1(t_tac = .x$Times, reftac = .x$Reference,
+                                      roitac = .x$ROI1, 
+                                      weights = .x$Weights))) %>% 
+  ungroup()
+```
+
+Now let's look at the distribution of our BP~ND~ values
+
+```{r}
+simref <- simref %>% 
+  mutate(bp_MRTM1 = map_dbl(MRTM1fit, c("par", "bp")))
+
+ggplot(simref, aes(x=bp_MRTM1)) +
+  geom_histogram(fill="grey", colour="black")
+```
+
+
+
+## Iterating across Multiple Regions from Multiple Individuals
+
+Now, let's fit all the regions, and use a bunch of different models.  First, though, we need to account for some extra requirements of some other models.
+
+### k2prime
+
+One requirement of several linear reference region models is that a k2' (k2 prime) value be specified, i.e. the rate of efflux from the reference region. The prime means that it is from the reference tissue. Note: this is not the same as k2: the assumption is that $\frac{K_1}{k_2}=\frac{K_1'}{k_2'}$). This can be done by fitting this value using one of the models which fits it.  k2' can be assessed using SRTM indirectly, using R1 and k2 ($\frac{k_2}{R1}$), or directly using MRTM1.  It should, in theory, be stable across the brain, since it is a function of the reference region, and therefore it can be fitted for one region (usually selected as one with particularly low levels of noise) which we have already done above (or alternatively averaged over several regions).  Let's first extract the k2' values into their own column first.
+
+```{r}
+simref <- simref %>% 
+  mutate(k2prime = map_dbl(MRTM1fit, c("par", "k2prime")))
+
+ggplot(simref, aes(x=k2prime)) +
+  geom_histogram(fill="grey", colour="black")
+```
+
+
+### Model fitting
+
+Now, we have extracted estimated k2prime values, and selected t* values.  We are ready to fit most models.
+
+First, we rearrange the data a little bit, so that it is chunked at the level of ROIs within regions, as opposed to individuals.  Currently the data looks as follows:
+
+```{r}
+simref <- simref %>% 
+  select(-MRTM1fit, -bp_MRTM1)
+
+simref
+```
+
+
+Next, we want to chunk at a different level. Instead of individuals, we want to chunk at regions of each individual.
+
+```{r}
+simref_long <- simref %>% 
+  unnest() %>% 
+  select(-StartTime, -Duration, -PET)
+  
+simref_long
+```
+
+And now we make it into a very long format (i.e. 760 rows to 2280 rows).
+
+```{r}
+simref_long <- simref_long %>% 
+  gather(key = Region, value = TAC, -Times, -Weights,
+         -Subjname, -PETNo, -k2prime, -Reference)
+
+simref_long
+```
+
+
+And now we nest it again, with our desired level of chunking.
+
+```{r}
+simref_long <- simref_long %>% 
+  group_by(Subjname, PETNo, k2prime, Region) %>% 
+  nest(.key = "tacdata")
+
+simref_long
+```
+
+And within each chunk is the following:
+
+```{r}
+simref_long$tacdata[[1]]
+```
+
+Now we can proceed to fitting models to all the regions.
+
+```{r}
+simref_long <- simref_long %>% 
+  group_by(Subjname, PETNo, Region) %>% 
+  
+  # SRTM
+  mutate(SRTM = map(tacdata,
+                         ~srtm(t_tac=.x$Times, reftac = .x$Reference, 
+                               roitac = .x$TAC, 
+                               weights = .x$Weights)),
+         SRTM = map_dbl(SRTM, c("par", "bp"))) %>% 
+  
+  # MRTM1
+  mutate(MRTM1 = map(tacdata,
+                         ~mrtm1(t_tac=.x$Times, reftac = .x$Reference, 
+                               roitac = .x$TAC, 
+                               weights = .x$Weights)),
+         MRTM1 = map_dbl(MRTM1, c("par", "bp"))) %>% 
+  
+  # MRTM2
+  mutate(MRTM2 = map2(tacdata, k2prime,
+                         ~mrtm2(t_tac=.x$Times, reftac = .x$Reference, 
+                               roitac = .x$TAC, k2prime = .y,
+                               weights = .x$Weights)),
+         MRTM2 = map_dbl(MRTM2, c("par", "bp"))) %>% 
+  
+  # refLogan
+  mutate(refLogan = map2(tacdata, k2prime,
+                         ~refLogan(t_tac=.x$Times, reftac = .x$Reference, 
+                               roitac = .x$TAC, k2prime = .y,
+                               weights = .x$Weights, tstarIncludedFrames = 10)),
+         refLogan = map_dbl(refLogan, c("par", "bp"))) %>% 
+  
+  # refmlLogan
+  mutate(refmlLogan = map2(tacdata, k2prime,
+                         ~refmlLogan(t_tac=.x$Times, reftac = .x$Reference, 
+                               roitac = .x$TAC, k2prime = .y,
+                               weights = .x$Weights, tstarIncludedFrames = 10)),
+         refmlLogan = map_dbl(refmlLogan, c("par", "bp"))) %>% 
+  ungroup()
+```
+
+
+## Comparisons between Models
+
+Now let's check the correlations between the estimated BP~ND~ values.
+
+
+```{r}
+simref_bpvals <- simref_long %>%
+  ungroup() %>% 
+  select(Region, SRTM, refLogan, refmlLogan, MRTM1, MRTM2)
+
+refvals <- ggplot(simref_bpvals, aes(x = .panel_x, y = .panel_y, 
+                                     colour=Region, fill=Region)) + 
+                      geom_point(position = 'auto') + 
+                      geom_autodensity(alpha = 0.3, colour = NA, 
+                                       position = 'identity') + 
+                      facet_matrix(vars(SRTM, refLogan, refmlLogan, 
+                                        MRTM1, MRTM2), 
+                                   layer.diag = 2) +
+                      geom_smooth(method="lm", se=F) +
+                      guides(colour=FALSE, fill=FALSE)
+
+print(refvals)
+
+rm(simref_long)  # Removing to free up some memory
+```
+
+
+
+
+# Arterial Input Models
+
+Now we will work with some data for which there is no reference region. This is data collected using [${11}$C]PBR28, which binds to the 18kDa translocator protein, which is found throughout the brain, meaning that there is no reference region.
+
+Some of the models here take a little while to run, so I'll cut the dataset short to 4 measurements.
+
+## Blood Processing
+
+The first, complicated aspect of working with data for which we must use the arterial plasma as a reference is that this data is collected through a parallel data collection, and is stored separately. I've written up another vignette about how to do this. But, for expedience, here I'll just interpolate some data which was already processed.  Let's look at how the data looks, and what's in the processed blood data for a random subject.
+
+```{r}
+data(pbr28)
+
+pbr28 <- pbr28[1:4,]
+
+names(pbr28)
+
+head(pbr28$procblood[[2]])
+```
+
+Here, we were provided with Time (in seconds), the radioactivity in blood after dispersion correction, and the radioactivity in plasma after metabolite correction. We want to turn this data into an "input" object: arranged with all the things we need for modelling. Of note, because the plasma has already been metabolite-corrected, we will set the parent fraction to 1 throughout, since we don't want the function correcting for metabolites again. Once again, check out the blood processing vignette if you want to know more about blood processing in general.
+
+If we wanted to process the blood data for one subject:
+
+```{r}
+input <- blood_interp(
+  t_blood = pbr28$procblood[[2]]$Time / 60, 
+  blood = pbr28$procblood[[2]]$Cbl_dispcorr, 
+  t_plasma = pbr28$procblood[[2]]$Time / 60, 
+  plasma = pbr28$procblood[[2]]$Cpl_metabcorr,
+  t_parentfrac = 1, parentfrac = 1
+)
+
+round(head(input), 2)
+```
+
+Now, let's do it for everyone.
+
+```{r}
+pbr28 <- pbr28 %>% 
+  group_by(PET) %>% 
+  mutate(input = map(procblood,
+                     ~blood_interp(
+                        t_blood = .x$Time / 60, 
+                        blood = .x$Cbl_dispcorr, 
+                        t_plasma = .x$Time / 60, 
+                        plasma = .x$Cpl_metabcorr,
+                        t_parentfrac = 1, parentfrac = 1))) %>% 
+  ungroup()
+```
+
+Great! Now we have input objects for each measurement.
+
+## Preparations for Modelling the TACs
+
+## Modelling the Delay
+
+When it comes to modelling the TACs, the first thing we need to do is to match the timing of the TAC and the blood, by estimating the delay between the blood samples and the TAC.  We can do this using one of the tissue compartmental models, with an additional parameter representing the delay. This is fitted by default if not specified in the nonlinear models, and will give an error if not specified in the other models.
+
+```{r}
+pbr28 <- pbr28 %>% 
+  group_by(Subjname) %>% 
+  mutate(delayFit = map2(tacs, input,
+                         ~twotcm(t_tac = .x$Times/60, # sec to min
+                                 tac = .x$WB, 
+                                 input = .y, 
+                                 weights = .x$Weights, 
+                                 vB=0.05)))
+```
+
+Let's ignore the warnings for now. Not important at this point.
+
+Now let's check them, because delay fitting can go slightly awry.
+
+```{r}
+walk2(pbr28$delayFit, pbr28$PET , 
+      ~print(plot_inptac_fit(.x) + ggtitle(.y)))
+```
+
+Hmmm... While the first and last look ok, the other two don't look great. Let's instead use only the first 10 minutes of the TACs to make sure we home in on the delay. Firstly, how many frames for 10 minutes?
+
+```{r}
+which( pbr28$tacs[[1]]$Times/60 < 10)
+```
+
+Ok, so let's use 22 frames
+
+```{r}
+pbr28 <- pbr28 %>% 
+  group_by(Subjname) %>% 
+  mutate(delayFit = map2(tacs, input,
+                         ~twotcm(t_tac = .x$Times/60, # sec to min
+                                 tac = .x$WB, 
+                                 input = .y, 
+                                 weights = .x$Weights, 
+                                 vB=0.05, 
+                                 frameStartEnd = c(1, 22))))
+```
+
+We can continue to ignore the warnings.
+
+Now let's check them again.
+
+```{r}
+walk2(pbr28$delayFit, pbr28$PET , 
+      ~print(plot_inptac_fit(.x) + ggtitle(.y)))
+```
+
+
+
+Beautiful!  Now we'll extract the delay values and use those in future models.
+
+```{r}
+pbr28 <- pbr28 %>%
+  group_by(Subjname) %>% 
+  mutate(inpshift = map_dbl(delayFit, c("par", "inpshift")))
+```
+
+### Estimating t*
+
+For the linear models, we will need to decide on t* values again.  Instead of doing it again in this tutorial, we will just use 10 frames.
+
+
+## Model Fitting
+
+Now that we have interpolated the blood, modelled the delay and selected t* values, we are ready to start modelling the TACs.  Let's first select three TACs per individual.
+
+```{r}
+pbr28 <- pbr28 %>% 
+  group_by(PET) %>% 
+  mutate(tacs = map(tacs, ~select(.x, Times, Weights, FC, STR, CBL))) %>% 
+  select(PET, tacs, input, inpshift)
+```
+
+
+Now we have to rearrange the data as before, but now we also have the input data.  Let's first separate the data, rearrange, and then join them again.
+
+```{r}
+pbr28_input <- select(pbr28, PET, input)
+
+pbr28_tacs <- select(pbr28, PET, tacs, inpshift)
+
+pbr28_long <- pbr28_tacs %>% 
+  unnest() %>% 
+  gather(key = Region, value = TAC, -Times, -Weights, -inpshift, -PET) %>% 
+  group_by(PET, inpshift, Region) %>% 
+  nest(.key = "tacdata") %>% 
+  full_join(pbr28_input)
+```
+
+And now let's see what it looks like now.
+
+```{r}
+pbr28_long
+```
+
+
+Now we can proceed to fitting models to all the regions. Let's first just fit data for a single individual, before iterating to show the general principle.
+
+```{r}
+t_tac     <- pbr28_long$tacdata[[2]]$Times/60
+tac       <- pbr28_long$tacdata[[2]]$TAC
+input     <- pbr28_long$input[[2]]
+weights   <- pbr28_long$tacdata[[2]]$Weights
+inpshift  <- pbr28_long$inpshift[2]
+
+pbrfit <- twotcm(t_tac, tac, input, weights, inpshift) 
+
+plot(pbrfit)
+```
+
+That fit looks good to me! And let's see what's in the fit object.
+
+```{r}
+str(pbrfit)
+```
+
+You will notice that I've included, for example, the whole input object in the fit output. This is because this is the input (and TAC) after being time-shifted to match one another. This process is more complicated than it may seem, since it requires a fresh interpolation, sometimes padding the curves with values on either side. It's very helpful for looking into poor fits, and diagnosing what's going wrong. But it's a bit of a memory hog. I advise some degree of caution with saving millions of model fits with arterial models. A good approach is to check the fits, and then extract only the parameters of interest for further analysis.
+
+Another point worth making is with regards to the parameters
+
+```{r}
+round(pbrfit$par, 3)
+round(pbrfit$par.se, 3)
+```
+
+You will notice that the rate constants individually (often called the microparameters) are estimated with rather poor identifiability (i.e. high percentage standard error). However, their combination in V~T~ ($V_{T-2TCM}=\frac{K_1}{k_2}(1 + \frac{k_3}{k_4})$) (often called a macroparameter) is much more identifiable. This is because the rate constants are highly dependent on one another. So we should be careful about reading too much into their individual values, but we can derive much more value from V~T~.
+
+
+For iteration, where we used the *purrr::map* and *purrr::map2* functions before, we must now use *purrr::pmap*.  This requires us to write a few small functions first.  We'll also just skip returning the whole model fits, and just return the V~T~ values in order to keep this quick and memory usage down.
+
+```{r}
+fit_1tcm <- function(tacdata, input, inpshift) {
+  onetcm(t_tac = tacdata$Times/60, tac = tacdata$TAC,
+         input = input, weights = tacdata$Weights, 
+         inpshift = inpshift)$par$Vt
+}
+
+fit_2tcm <- function(tacdata, input, inpshift) {
+  twotcm(t_tac = tacdata$Times/60, tac = tacdata$TAC,
+         input = input, weights = tacdata$Weights, 
+         inpshift = inpshift)$par$Vt
+}
+
+fit_2tcm1k <- function(tacdata, input, inpshift) {
+  twotcm1k(t_tac = tacdata$Times/60, tac = tacdata$TAC,
+         input = input, weights = tacdata$Weights, 
+         inpshift = inpshift, vB = 0.05)$par$Vt
+}
+
+fit_Logan <- function(tacdata, input, inpshift) {
+  Loganplot(t_tac = tacdata$Times/60, tac = tacdata$TAC,
+         input = input, weights = tacdata$Weights, 
+         inpshift = inpshift, 
+         tstarIncludedFrames = 10)$par$Vt
+}
+
+fit_mlLogan <- function(tacdata, input, inpshift) {
+  mlLoganplot(t_tac = tacdata$Times/60, tac = tacdata$TAC,
+         input = input, weights = tacdata$Weights, 
+         inpshift = inpshift, 
+         tstarIncludedFrames = 10)$par$Vt
+}
+
+fit_ma1 <- function(tacdata, input, inpshift) {
+  ma1(t_tac = tacdata$Times/60, tac = tacdata$TAC,
+         input = input, weights = tacdata$Weights, 
+         inpshift = inpshift, 
+         tstarIncludedFrames = 10)$par$Vt
+}
+
+fit_ma2 <- function(tacdata, input, inpshift) {
+  ma2(t_tac = tacdata$Times/60, tac = tacdata$TAC,
+         input = input, weights = tacdata$Weights, 
+         inpshift = inpshift)$par$Vt
+}
+```
+
+And now let's fit the models.  We'll also separate this one out for the purposes of seeing where the boundary limits are hit (the warnings we saw above).
+
+```{r}
+pbr28_long <- pbr28_long %>% 
+  group_by(PET, Region)
+  
+  # 1TCM
+pbr28_long <- pbr28_long %>% 
+  mutate("1TCM" = pmap_dbl(list(tacdata, input, inpshift), fit_1tcm))
+
+  # 2TCM
+pbr28_long <- pbr28_long %>% 
+  mutate("2TCM" = pmap_dbl(list(tacdata, input, inpshift), fit_2tcm))
+
+  # 2TCM1k
+pbr28_long <- pbr28_long %>% 
+  mutate("2TCM1k" = pmap_dbl(list(tacdata, input, inpshift), fit_2tcm1k))
+  
+  # Logan
+pbr28_long <- pbr28_long %>% 
+  mutate("Logan" = pmap_dbl(list(tacdata, input, inpshift), fit_Logan))
+  
+  # mlLogan
+pbr28_long <- pbr28_long %>% 
+  mutate("mlLogan" = pmap_dbl(list(tacdata, input, inpshift), fit_mlLogan))
+  
+  # MA1
+pbr28_long <- pbr28_long %>% 
+  mutate("MA1" = pmap_dbl(list(tacdata, input, inpshift), fit_ma1))
+  
+  # MA2
+pbr28_long <- pbr28_long %>% 
+  mutate("MA2" = pmap_dbl(list(tacdata, input, inpshift), fit_ma2))
+  
+pbr28_long <- pbr28_long %>% 
+  ungroup()
+```
+
+We see warnings for all the nonlinear models. What does this warning mean? Well, when we fit nonlinear least squares models, we provide starting values, as well as upper and lower limits for each of the parameters, and then our model hops around parameter space using gradient descent to try to find the parameters which maximise the likelihood of the data (i.e. they move around parameter space until they find a set of paramaters which, moving in any direction causes the fit to worsen). This does not guarantee that we find the *best* set of parameters: there are potentially a multitude of local minima (places where the cost function is low relative to surroundings), but these can be different from the global minimum (the best possible set of parameters). This warning emerges because we've landed up against one of our limits in one of our parameters. This could either be due to having set upper and lower values which are too restrictive, or it could be because our model is landing in a local minimum, or chasing the parameters off into a corner: our model can compensate for bad estimates in one parameter by adjusting one of the other parameters.  This is almost the definition of poor identifiability: the noise in the data is such that the model cannot identify a unique set of parameters which describes it best: rather there are numerous combinations of the parameters which all describe the (noisy) data about as well as each other.  Conveniently, however, most of these sets of parameters result in similar V~T~ estimates.
+
+Anyhow, to solve this, we could either mess about with the starting parameters, the upper limits or the lower limits. Otherwise, if we think that the limits are ok, and the fit is just going in the wrong direction, we can set the model to fit multiple times using a bunch of different starting parameters and choose the best fit, using the [nls.multstart package](https://github.com/padpadpadpad/nls.multstart).  Let's try for one fit. The seventh fit was one such failure.
+
+```{r}
+i=7
+tacdata = pbr28_long$tacdata[[i]]
+input = pbr28_long$input[[i]]
+inpshift =  pbr28_long$inpshift[i]
+
+badfit <- twotcm(t_tac = tacdata$Times/60, tac = tacdata$TAC,
+                  input = input, weights = tacdata$Weights, 
+                  inpshift = inpshift)
+
+badfit$par
+```
+
+Now, those k3 and k4 values look extremely high: they mean that 50% of what's in the non-displaceable compartment is entering the specific compartment every minute, and 50% of what's in the specific compartment is entering the non-displaceable compartment each minute. This is essentially fitting a one-tissue compartment model, as it's assuming that the equilibrium between these two compartments is so rapid. We know, from the rest of the sample, and from previous experience with this tracer, and other studies using this tracer, that that doesn't sound quite right.  So let's try with multstart. We can either provide a single value (for which it just chooses that number of randomly selected starting parameters from across parameter space and fits the model), or we can even provide a vector of numbers, which defines an grid across each of the parameters fitted in the model and tries at each point. Because we're being lazy, let's just use the former, simpler approach (the latter is really the nuclear option...)!
+
+```{r}
+set.seed(42)
+multstartfit <- twotcm(t_tac = tacdata$Times/60, tac = tacdata$TAC,
+                        input = input, weights = tacdata$Weights, 
+                        inpshift = inpshift, 
+                        multstart_iter = 20)
+```
+
+And, no warnings!  Let's check those parameters compared with the old ones.
+
+```{r}
+bind_rows(badfit$par, multstartfit$par) %>% 
+  mutate_all(~round(.x, 3)) %>% 
+  mutate(Method=c("Single Fit", "Multstart Fit"))
+```
+
+We can see that our V~T~ values were somewhat consistent (though actually, this is an uncharacteristically large deviation). But we can also see that k3 and k4 have changed a great deal. We could probably have resolved this from the start by setting better starting parameters, as the defaults are 0.1 and 0.1 respectively.
+
+Just a note: the reason this is happening is more a product of PBR28 as a radiotracer than anything else. It isn't quite fit correctly even by the 2TCM, and it's generally a bit of a nightmare for modellers (I personally trust MA1 much more for this tracer). Using *multstart*, in addition to being a bit slower, also adds a little bit of extra randomness to the equation. But it can also be a lifesaver when things are really acting up.
+
+
+<!-- Now let's check the correlations between the estimated V~T~ values (and we'll skip fitting everything again). -->
+
+
+<!-- ```{r} -->
+<!-- pbr28_vtvals <- pbr28_long %>% -->
+<!--   ungroup() %>%  -->
+<!--   select("1TCM", "2TCM", "2TCM1k", Logan, mlLogan, MA1, MA2) -->
+
+<!-- art_corrplot <- ggcorrplot(cor(pbr28_vtvals), lab=T,  -->
+<!--            colors = c("#6D9EC1", "white", "#E46726"),  -->
+<!--            digits = 3, show.diag = F) -->
+
+<!-- print(art_corrplot) -->
+<!-- ``` -->

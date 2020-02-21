@@ -1,0 +1,21 @@
+Type: Compendium
+Package: kinfitr Basics
+Title: Learn the Basics of kinfitr
+Version: 0.0.1
+Authors@R: 
+    person(given = "Granville",
+           family = "Matheson",
+           role = c("aut", "cre"),
+           email = "mathesong@gmail.com",
+           comment = c(ORCID = "0000-0002-5646-4547"))
+Description: A vignette demonstrating the basic usage of
+    the kinfitr package
+License: MIT
+Depends: 
+    cowplot,
+    ggforce,
+    knitr,
+    rmarkdown,
+    mgcv
+Encoding: UTF-8
+LazyData: true
