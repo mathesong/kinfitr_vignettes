@@ -1,6 +1,6 @@
 Type: Compendium
-Package: kinfitr Basics
-Title: Learn the Basics of kinfitr
+Package: kinfitr Vignettes
+Title: Mess Around with kinfitr
 Version: 0.0.1
 Authors@R: 
     person(given = "Granville",
@@ -8,7 +8,7 @@ Authors@R:
            role = c("aut", "cre"),
            email = "mathesong@gmail.com",
            comment = c(ORCID = "0000-0002-5646-4547"))
-Description: A vignette demonstrating the basic usage of
+Description: A vignette demonstrating usage of
     the kinfitr package
 License: MIT
 Depends: 

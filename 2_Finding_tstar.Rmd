@@ -1,5 +1,5 @@
 ---
-title: 'kinfitr Part 2: Basic Use and Iteration'
+title: 'kinfitr Vignette: Finding tstar'
 output:
   html_document:
     df_print: paged
@@ -11,7 +11,8 @@ output:
 
 When making use of linearised models, most of them have a t\* parameter either as an option or a requirement. These models rely on asymptotic properties of the data, and these properties only apply after a certain point: i.e. when the modified function becomes sufficiently linear. The way I've made these work in *kinfitr* is quite specific, and I think optimal.
 
-I've compiled the results of the vignettes on my website, as well as written up a primer on PET modelling theory for anyone who's interested.  Check it out [here](https://www.granvillematheson.com/post/2020-02-21-pharmacokinetic-modelling-of-pet-data-in-r-using-kinfitr-part-1-theory)
+I've compiled the results of the vignettes on my website, as well as written up a primer on PET modelling theory for anyone who's interested.  Check it out [here](https://www.granvillematheson.com/post/2020-02-21-pharmacokinetic-modelling-of-pet-data-in-r-using-kinfitr-part-1-theory).
+
 
 # Packages
 
@@ -42,7 +43,7 @@ For the assessment of t* in *kinfitr*, I specifically opted to give the user a b
 
 Let's take a look at one of these for the non-invasive Logan plot and I'll explain my logic of how to interpret it below.  The user is asked to provide 3 time activity curves from each individual here. Ideally, this should be from a high-binding, a medium-binding and a low-binding region. The reason is that sometimes high-binding regions have a later t\* value for example. But if you only have 1 TAC, just specify the same in all three: it doesn't really matter. Ideally, please use large regions, because small ones can be a bit noisy.
 
-We need to specify a k2prime value for this model. I'll just use 0.1 as it's close enough for now. This was covered in Part 2.
+We need to specify a k2prime value for this model. I'll just use 0.1 as it's close enough for now. This was covered in the basics vignette.
 
 ```{r, fig.height=12, fig.width=15}
 set.seed(12345)

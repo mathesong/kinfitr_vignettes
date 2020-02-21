@@ -1,5 +1,5 @@
 ---
-title: 'kinfitr Part 2: Basic Use and Iteration'
+title: 'kinfitr Vignette: Basic Use and Iteration'
 output:
   html_document:
     df_print: paged
@@ -476,6 +476,27 @@ round(pbrfit$par.se, 3)
 ```
 
 You will notice that the rate constants individually (often called the microparameters) are estimated with rather poor identifiability (i.e. high percentage standard error). However, their combination in V~T~ ($V_{T-2TCM}=\frac{K_1}{k_2}(1 + \frac{k_3}{k_4})$) (often called a macroparameter) is much more identifiable. This is because the rate constants are highly dependent on one another. So we should be careful about reading too much into their individual values, but we can derive much more value from V~T~.
+
+
+Let's also just demonstrate a couple of other models and their fits.
+
+```{r}
+plot(onetcm(t_tac, tac, input, weights, inpshift)) + 
+       labs(title="1TCM")
+
+plot(twotcm1k(t_tac, tac, input, weights, inpshift)) + 
+       labs(title="2TCM1k")
+
+plot(Loganplot(t_tac, tac, input,
+               tstarIncludedFrames =  10,
+               weights, inpshift)) + 
+       labs(title="Logan Plot")
+
+plot(ma1(t_tac, tac, input,
+               tstarIncludedFrames =  10,
+               weights, inpshift)) + 
+       labs(title="MA1")
+```
 
 
 For iteration, where we used the *purrr::map* and *purrr::map2* functions before, we must now use *purrr::pmap*.  This requires us to write a few small functions first.  We'll also just skip returning the whole model fits, and just return the V~T~ values in order to keep this quick and memory usage down.

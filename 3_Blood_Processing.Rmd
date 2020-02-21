@@ -1,5 +1,5 @@
 ---
-title: 'kinfitr Part 2: Basic Use and Iteration'
+title: 'kinfitr Vignette: Blood Processing'
 output:
   html_document:
     df_print: paged
@@ -380,5 +380,5 @@ pbr28 <- pbr28 %>%
   mutate(input = map(blooddata, bd_getdata))
 ```
 
-Done!  Now we can get to modelling.  See Part 1.
+Done!  Now we can get to modelling.
 
